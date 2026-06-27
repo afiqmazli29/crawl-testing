@@ -1,0 +1,2 @@
+createSrcSidebar('[["firecrawl",["",[],["agent.rs","batch_scrape.rs","client.rs","crawl.rs","error.rs","lib.rs","map.rs","monitor.rs","parse.rs","research.rs","scrape.rs","search.rs","serde_helpers.rs","types.rs"]]]]');
+//{"start":19,"fragment_lengths":[196]}
