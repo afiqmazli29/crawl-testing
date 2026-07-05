@@ -12,9 +12,40 @@ cp .env.example .env
 cargo run
 ```
 
-Output: `halal_all.json` with all records across every category.
+Output: `halal.db` (SQLite) + `halal_all.json` (backup).
 
-## Data fields
+## Database
+
+Uses **SQLite** by default (`halal.db`). To migrate to PostgreSQL:
+
+1. Change `DATABASE_URL` in `.env`:
+   ```
+   DATABASE_URL=postgres://user:pass@localhost/halal
+   ```
+2. Update `Cargo.toml` — swap `sqlite` for `postgres`:
+   ```toml
+   sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
+   ```
+3. Change `SqlitePool` → `PgPool` in `main.rs`
+4. The rest of the code stays the same.
+
+### Schema
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | INTEGER PK | Auto-increment ID |
+| `bil` | INTEGER | Row number on page |
+| `company` | TEXT | Company name |
+| `address` | TEXT | Full address |
+| `expiry_date` | TEXT | Halal expiry date(s) |
+| `category_code` | TEXT | e.g. `BG`, `FM` |
+| `category_name` | TEXT | e.g. `Barang Gunaan` |
+| `subcategory_code` | TEXT | e.g. `CO`, `BG` |
+| `subcategory_name` | TEXT | e.g. `Syarikat` |
+| `page` | INTEGER | Source page number |
+| `scraped_at` | TEXT | Timestamp of scrape |
+
+## Data fields (JSON)
 
 | Field | Description |
 |-------|-------------|
