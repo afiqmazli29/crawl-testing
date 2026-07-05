@@ -1,8 +1,10 @@
 # Rust build artifacts
 /target/
 
-# Scraped data (reproducible, don't commit large files)
-halal_all.json
+# Environment (secrets)
+.env
+
+# Scraped data
 halal_*.json
 halal_*.csv
 

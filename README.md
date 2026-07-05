@@ -5,8 +5,9 @@ Scrapes the [Malaysia Halal Portal](https://myehalal.halal.gov.my/) public direc
 ## Quick start
 
 ```bash
-# Set your Firecrawl API key
-export FIRECRAWL_API_KEY="fc-..."
+# Copy the example env file and add your Firecrawl API key
+cp .env.example .env
+# Edit .env with your key, then:
 
 cargo run
 ```
