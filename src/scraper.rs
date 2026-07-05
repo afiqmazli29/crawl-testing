@@ -7,18 +7,17 @@ use tokio::task::JoinSet;
 use tokio::time::sleep;
 
 use crate::parser;
-use crate::types::Error;
+use crate::types::{Error, SubStrategy};
 
-/// Scrape all pages for a category+subcategory combination.
-pub async fn scrape_category(
+/// Scrape a subcategory (companies or other), returning parsed records.
+pub async fn scrape_subcategory(
     client: &Arc<Client>,
     semaphore: &Arc<Semaphore>,
     base: &str,
-    data: &str,
-    cat_code: &str,
-    sub_code: &str,
+    strategy: &SubStrategy,
+    max_pages: u32,
 ) -> Result<Vec<serde_json::Value>, Error> {
-    let param_candidates: &[&str] = if sub_code.is_empty() {
+    let param_candidates: &[&str] = if strategy.sub_code.is_empty() {
         &[""]
     } else {
         &["subcategory", "menu", "sub", "type"]
@@ -28,16 +27,19 @@ pub async fn scrape_category(
         let sp = if pname.is_empty() {
             String::new()
         } else {
-            format!("&{pname}={sub_code}")
+            format!("&{pname}={}", strategy.sub_code)
         };
-        let url1 = format!("{base}?data={data}&category={cat_code}{sp}");
+        let url1 = format!(
+            "{base}?data={}&category={}{sp}",
+            strategy.data_param, strategy.category_code
+        );
 
         let t0 = Instant::now();
         let doc = scrape_with_retry(client, semaphore, &url1, 3).await?;
         let md = doc.markdown.unwrap_or_default();
 
         if md.contains("Total Record") {
-            let total_pages = parser::extract_total_pages(&md);
+            let total_pages = parser::extract_total_pages(&md).min(max_pages);
 
             let page1_count = parser::parse_table(&md, 1).len();
             println!(
@@ -48,16 +50,9 @@ pub async fn scrape_category(
             let mut records = parser::parse_table(&md, 1);
 
             if total_pages > 1 {
-                let more = fetch_remaining_pages(
-                    client,
-                    semaphore,
-                    base,
-                    data,
-                    cat_code,
-                    &sp,
-                    total_pages,
-                )
-                .await?;
+                let more =
+                    fetch_remaining_pages(client, semaphore, base, strategy, &sp, total_pages)
+                        .await?;
                 records.extend(more);
             }
 
@@ -69,23 +64,24 @@ pub async fn scrape_category(
     Ok(vec![])
 }
 
-/// Fetch pages 2..total_pages concurrently.
 async fn fetch_remaining_pages(
     client: &Arc<Client>,
     semaphore: &Arc<Semaphore>,
     base: &str,
-    data: &str,
-    cat_code: &str,
+    strategy: &SubStrategy,
     sub_param: &str,
     total_pages: u32,
 ) -> Result<Vec<serde_json::Value>, Error> {
-    let done = Arc::new(AtomicU32::new(1)); // page 1 already done
+    let done = Arc::new(AtomicU32::new(1));
     let failed = Arc::new(AtomicU32::new(0));
     let mut set = JoinSet::new();
     let mut records = Vec::new();
 
     for page in 2..=total_pages {
-        let url = format!("{base}?data={data}&category={cat_code}{sub_param}&page={page}");
+        let url = format!(
+            "{base}?data={}&category={}{sub_param}&page={page}",
+            strategy.data_param, strategy.category_code
+        );
         let c = Arc::clone(client);
         let s = Arc::clone(semaphore);
         let d = Arc::clone(&done);
@@ -122,7 +118,6 @@ async fn fetch_remaining_pages(
     Ok(records)
 }
 
-/// Scrape a URL with retry on transient errors.
 async fn scrape_with_retry(
     client: &Client,
     semaphore: &Semaphore,

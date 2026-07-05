@@ -3,10 +3,8 @@ mod parser;
 mod scraper;
 mod types;
 
-use serde_json::json;
-use std::fs;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use types::Error;
 
@@ -14,7 +12,6 @@ use types::Error;
 async fn main() -> Result<(), Error> {
     let started = Instant::now();
 
-    // ── Config ────────────────────────────────────────────────────────
     if std::path::Path::new(".env").exists() {
         dotenvy::dotenv().ok();
     } else {
@@ -30,111 +27,94 @@ async fn main() -> Result<(), Error> {
     let db_url =
         std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:halal.db?mode=rwc".to_string());
 
-    // ── Init ──────────────────────────────────────────────────────────
     let client = Arc::new(firecrawl::Client::new(&api_key)?);
     let semaphore = types::semaphore();
     let pool = db::init(&db_url).await?;
 
     let base = "https://myehalal.halal.gov.my/portal-halal/v1/index.php";
-    let data = "ZGlyZWN0b3J5L2luZGV4X2RpcmVjdG9yeTs7Ozs=";
-    let categories = types::categories();
+    let company_strategies = types::company_strategies();
+    let other_strategies = types::other_strategies();
 
-    // ── Scrape ────────────────────────────────────────────────────────
-    let total_categories = categories.len();
-    let mut all_records: Vec<serde_json::Value> = Vec::new();
-    let mut cat_summary: Vec<(String, u32, Duration)> = Vec::new();
+    db::seed_categories(&pool, &company_strategies).await?;
+    db::seed_categories(&pool, &other_strategies).await?;
 
-    for (cat_idx, (code, name, subs)) in categories.iter().enumerate() {
-        let cat_start = Instant::now();
-        let mut cat_total = 0u32;
+    let mut total_companies = 0usize;
+    let mut total_others = 0usize;
+    let max_pages = u32::MAX;
 
+    // ── Phase 1: Companies (CO) ───────────────────────────────────────
+    println!("\n═══ PHASE 1: COMPANIES (CO) ═══");
+    for (idx, s) in company_strategies.iter().enumerate() {
         println!(
-            "\n┌─ [{}/{}] {name} ({code})",
-            cat_idx + 1,
-            total_categories
+            "\n┌─ [{}/{}] {} ({})",
+            idx + 1,
+            company_strategies.len(),
+            s.category_name,
+            s.category_code
         );
 
-        let sub_pairs: Vec<(&str, &str)> = if subs.is_empty() {
-            vec![("", "")]
-        } else {
-            subs.iter().map(|(c, n)| (*c, *n)).collect()
-        };
-        let total_subs = sub_pairs.len();
-
-        for (sub_idx, (sub_code, sub_name)) in sub_pairs.iter().enumerate() {
-            let label = if sub_code.is_empty() {
-                format!("{name} (default)")
-            } else {
-                format!("{name} › {sub_name}")
-            };
-
-            if total_subs > 1 {
-                println!("│  ┌─ [{}.{}] {}", cat_idx + 1, sub_idx + 1, label);
-            } else {
-                println!("│  └─ {label}");
+        match scraper::scrape_subcategory(&client, &semaphore, base, s, max_pages).await {
+            Ok(records) => {
+                let n = db::insert_companies(&pool, &records, s.category_code).await?;
+                total_companies += n;
+                println!("└─ {n} companies → DB");
             }
-
-            match scraper::scrape_category(&client, &semaphore, base, data, code, sub_code).await {
-                Ok(records) => {
-                    let count = records.len() as u32;
-                    cat_total += count;
-                    for mut r in records {
-                        if let Some(obj) = r.as_object_mut() {
-                            obj.insert("category_code".into(), json!(code));
-                            obj.insert("category_name".into(), json!(name));
-                            obj.insert("subcategory_code".into(), json!(sub_code));
-                            obj.insert("subcategory_name".into(), json!(sub_name));
-                        }
-                        all_records.push(r);
-                    }
-                }
-                Err(e) => eprintln!("│    ✗ FAILED: {e}"),
-            }
+            Err(e) => eprintln!("└─ ✗ {e}"),
         }
-
-        let elapsed = cat_start.elapsed();
-        println!(
-            "└─ {name}: {cat_total} records in {:.1}s",
-            elapsed.as_secs_f32()
-        );
-        cat_summary.push((name.to_string(), cat_total, elapsed));
     }
 
-    // ── Save ──────────────────────────────────────────────────────────
-    db::insert_all(&pool, &all_records).await?;
+    // ── Phase 2: Products & others ────────────────────────────────────
+    println!("\n═══ PHASE 2: PRODUCTS & OTHERS ═══");
+    for (idx, s) in other_strategies.iter().enumerate() {
+        println!(
+            "\n┌─ [{}/{}] {} › {} ({})",
+            idx + 1,
+            other_strategies.len(),
+            s.category_name,
+            s.sub_name,
+            s.sub_code
+        );
 
-    let json = serde_json::to_string_pretty(&all_records)?;
-    fs::write("halal_all.json", &json)?;
-    println!(
-        "Saved halal_all.json ({:.1} MB)",
-        json.len() as f32 / 1_000_000.0
-    );
+        match scraper::scrape_subcategory(&client, &semaphore, base, s, max_pages).await {
+            Ok(records) => {
+                let n = db::insert_products(&pool, &records, s.category_code, s.sub_code).await?;
+                total_others += n;
+                println!("└─ {n} listings → DB");
+            }
+            Err(e) => eprintln!("└─ ✗ {e}"),
+        }
+    }
 
     // ── Summary ───────────────────────────────────────────────────────
-    let total_elapsed = started.elapsed();
+    let elapsed = started.elapsed();
     println!("\n╔══════════════════════════════════════════╗");
     println!(
-        "║  DONE: {} records in {:.1}s          ║",
-        all_records.len(),
-        total_elapsed.as_secs_f32()
+        "║  DONE: {} companies + {} others  ║",
+        total_companies, total_others
+    );
+    println!(
+        "║  in {:.1}s                          ║",
+        elapsed.as_secs_f32()
     );
     println!("╚══════════════════════════════════════════╝");
 
-    println!("\n── Per-category summary ──");
-    for (name, count, dur) in &cat_summary {
-        println!("  {name:30} {count:>6} records  {:.1}s", dur.as_secs_f32());
+    println!("\n── Sample companies ──");
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT name, address FROM companies ORDER BY RANDOM() LIMIT 3")
+            .fetch_all(&pool)
+            .await?;
+    for (name, addr) in &rows {
+        println!("  {name} — {addr}");
     }
 
-    println!("\n── Sample records ──");
-    for r in all_records.iter().take(5) {
-        println!(
-            "  [{}/{}] #{} | {} | {}",
-            r["category_code"].as_str().unwrap_or("?"),
-            r["subcategory_code"].as_str().unwrap_or("-"),
-            r["bil"],
-            r["company"].as_str().unwrap_or("?"),
-            r["expiry_date"].as_str().unwrap_or("?")
-        );
+    println!("\n── Sample others ──");
+    let rows: Vec<(String, Option<String>, String)> = sqlx::query_as(
+        "SELECT name, address, subcategory_code FROM products ORDER BY RANDOM() LIMIT 3",
+    )
+    .fetch_all(&pool)
+    .await?;
+    for (name, addr, code) in &rows {
+        println!("  [{code}] {name} — {}", addr.as_deref().unwrap_or("-"));
     }
 
     Ok(())

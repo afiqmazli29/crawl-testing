@@ -1,67 +1,116 @@
 use serde_json::Value;
 use sqlx::sqlite::SqlitePool;
-use std::time::Instant;
 
-use crate::types::Error;
+use crate::types::{Error, SubStrategy};
 
-/// Connect to the database and ensure the schema exists.
-/// Clears previous data on each run.
 pub async fn init(db_url: &str) -> Result<SqlitePool, Error> {
     let pool = SqlitePool::connect(db_url).await?;
 
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS companies (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            bil INTEGER NOT NULL,
-            company TEXT NOT NULL,
-            address TEXT NOT NULL,
-            expiry_date TEXT NOT NULL,
-            category_code TEXT NOT NULL,
-            category_name TEXT NOT NULL,
-            subcategory_code TEXT NOT NULL DEFAULT '',
-            subcategory_name TEXT NOT NULL DEFAULT '',
-            page INTEGER NOT NULL,
-            scraped_at TEXT NOT NULL DEFAULT (datetime('now'))
+        "CREATE TABLE IF NOT EXISTS categories (
+            code TEXT PRIMARY KEY,
+            name TEXT NOT NULL
         )",
     )
     .execute(&pool)
     .await?;
 
-    sqlx::query("DELETE FROM companies").execute(&pool).await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS companies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            address TEXT NOT NULL,
+            expiry_date TEXT NOT NULL,
+            category_code TEXT NOT NULL REFERENCES categories(code),
+            bil INTEGER NOT NULL,
+            scraped_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(category_code, name)
+        )",
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS products (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            address TEXT,
+            expiry_date TEXT,
+            category_code TEXT NOT NULL REFERENCES categories(code),
+            subcategory_code TEXT NOT NULL,
+            bil INTEGER NOT NULL,
+            scraped_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(category_code, subcategory_code, name)
+        )",
+    )
+    .execute(&pool)
+    .await?;
 
     println!("  DB ready: {db_url}");
     Ok(pool)
 }
 
-/// Batch-insert all records in a single transaction.
-pub async fn insert_all(pool: &SqlitePool, records: &[Value]) -> Result<(), Error> {
-    println!("\n── Writing to database...");
-    let started = Instant::now();
+pub async fn seed_categories(pool: &SqlitePool, strategies: &[SubStrategy]) -> Result<(), Error> {
+    for s in strategies {
+        sqlx::query("INSERT OR IGNORE INTO categories (code, name) VALUES (?, ?)")
+            .bind(s.category_code)
+            .bind(s.category_name)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
 
+pub async fn insert_companies(
+    pool: &SqlitePool,
+    records: &[Value],
+    category_code: &str,
+) -> Result<usize, Error> {
+    if records.is_empty() {
+        return Ok(0);
+    }
     let mut tx = pool.begin().await?;
     for r in records {
         sqlx::query(
-            "INSERT INTO companies (bil, company, address, expiry_date, category_code, category_name, subcategory_code, subcategory_name, page)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO companies (name, address, expiry_date, category_code, bil, scraped_at)
+             VALUES (?, ?, ?, ?, ?, datetime('now'))",
         )
-        .bind(r["bil"].as_i64().unwrap_or(0))
-        .bind(r["company"].as_str().unwrap_or(""))
+        .bind(r["name"].as_str().unwrap_or(""))
         .bind(r["address"].as_str().unwrap_or(""))
         .bind(r["expiry_date"].as_str().unwrap_or(""))
-        .bind(r["category_code"].as_str().unwrap_or(""))
-        .bind(r["category_name"].as_str().unwrap_or(""))
-        .bind(r["subcategory_code"].as_str().unwrap_or(""))
-        .bind(r["subcategory_name"].as_str().unwrap_or(""))
-        .bind(r["page"].as_i64().unwrap_or(0))
+        .bind(category_code)
+        .bind(r["bil"].as_i64().unwrap_or(0))
         .execute(&mut *tx)
         .await?;
     }
     tx.commit().await?;
+    Ok(records.len())
+}
 
-    println!(
-        "  DB write: {} rows in {:.1}s",
-        records.len(),
-        started.elapsed().as_secs_f32()
-    );
-    Ok(())
+pub async fn insert_products(
+    pool: &SqlitePool,
+    records: &[Value],
+    category_code: &str,
+    subcategory_code: &str,
+) -> Result<usize, Error> {
+    if records.is_empty() {
+        return Ok(0);
+    }
+    let mut tx = pool.begin().await?;
+    for r in records {
+        sqlx::query(
+            "INSERT OR REPLACE INTO products (name, address, expiry_date, category_code, subcategory_code, bil, scraped_at)
+             VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
+        )
+        .bind(r["name"].as_str().unwrap_or(""))
+        .bind(r["address"].as_str().unwrap_or(""))
+        .bind(r["expiry_date"].as_str().unwrap_or(""))
+        .bind(category_code)
+        .bind(subcategory_code)
+        .bind(r["bil"].as_i64().unwrap_or(0))
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(records.len())
 }
